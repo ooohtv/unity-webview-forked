@@ -47,6 +47,12 @@ public class SampleWebView : MonoBehaviour
                 status.text = msg;
                 status.GetComponent<Animation>().Play();
             },
+            httpErr: (msg) =>
+            {
+                Debug.Log(string.Format("CallOnHttpError[{0}]", msg));
+                status.text = msg;
+                status.GetComponent<Animation>().Play();
+            },
             started: (msg) =>
             {
                 Debug.Log(string.Format("CallOnStarted[{0}]", msg));
@@ -108,18 +114,29 @@ public class SampleWebView : MonoBehaviour
                     "};");
 #endif
                 webViewObject.EvaluateJS(@"Unity.call('ua=' + navigator.userAgent)");
-            },
+            }
+            //transparent: false,
+            //zoom: true,
             //ua: "custom user agent string",
-#if UNITY_EDITOR
-            separated: false,
-#endif
-            enableWKWebView: true);
+            //// android
+            //androidForceDarkMode: 0,  // 0: follow system setting, 1: force dark off, 2: force dark on
+            //// ios
+            //enableWKWebView: true,
+            //wkContentMode: 0,  // 0: recommended, 1: mobile, 2: desktop
+            //wkAllowsLinkPreview: true,
+            //// editor
+            //separated: false
+            );
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
         webViewObject.bitmapRefreshCycle = 1;
 #endif
         // cf. https://github.com/gree/unity-webview/pull/512
         // Added alertDialogEnabled flag to enable/disable alert/confirm/prompt dialogs. by KojiNakamaru · Pull Request #512 · gree/unity-webview
         //webViewObject.SetAlertDialogEnabled(false);
+
+        // cf. https://github.com/gree/unity-webview/pull/728
+        //webViewObject.SetCameraAccess(true);
+        //webViewObject.SetMicrophoneAccess(true);
 
         // cf. https://github.com/gree/unity-webview/pull/550
         // introduced SetURLPattern(..., hookPattern). by KojiNakamaru · Pull Request #550 · gree/unity-webview
@@ -129,7 +146,10 @@ public class SampleWebView : MonoBehaviour
         // Add BASIC authentication feature (Android and iOS with WKWebView only) by takeh1k0 · Pull Request #570 · gree/unity-webview
         //webViewObject.SetBasicAuthInfo("id", "password");
 
+        //webViewObject.SetScrollbarsVisibility(true);
+
         webViewObject.SetMargins(5, 100, 5, Screen.height / 4);
+        webViewObject.SetTextZoom(100);  // android only. cf. https://stackoverflow.com/questions/21647641/android-webview-set-font-size-system-default/47017410#47017410
         webViewObject.SetVisibility(true);
 
 #if !UNITY_WEBPLAYER && !UNITY_WEBGL
@@ -179,21 +199,31 @@ public class SampleWebView : MonoBehaviour
 
     void OnGUI()
     {
+        var x = 10;
+
         GUI.enabled = webViewObject.CanGoBack();
-        if (GUI.Button(new Rect(10, 10, 80, 80), "<")) {
+        if (GUI.Button(new Rect(x, 10, 80, 80), "<")) {
             webViewObject.GoBack();
         }
         GUI.enabled = true;
+        x += 90;
 
         GUI.enabled = webViewObject.CanGoForward();
-        if (GUI.Button(new Rect(100, 10, 80, 80), ">")) {
+        if (GUI.Button(new Rect(x, 10, 80, 80), ">")) {
             webViewObject.GoForward();
         }
         GUI.enabled = true;
+        x += 90;
 
-        GUI.TextField(new Rect(200, 10, 300, 80), "" + webViewObject.Progress());
+        if (GUI.Button(new Rect(x, 10, 80, 80), "r")) {
+            webViewObject.Reload();
+        }
+        x += 90;
 
-        if (GUI.Button(new Rect(600, 10, 80, 80), "*")) {
+        GUI.TextField(new Rect(x, 10, 180, 80), "" + webViewObject.Progress());
+        x += 190;
+
+        if (GUI.Button(new Rect(x, 10, 80, 80), "*")) {
             var g = GameObject.Find("WebViewObject");
             if (g != null) {
                 Destroy(g);
@@ -201,11 +231,16 @@ public class SampleWebView : MonoBehaviour
                 StartCoroutine(Start());
             }
         }
-        GUI.enabled = true;
+        x += 90;
 
-        if (GUI.Button(new Rect(700, 10, 80, 80), "c")) {
+        if (GUI.Button(new Rect(x, 10, 80, 80), "c")) {
             Debug.Log(webViewObject.GetCookies(Url));
         }
-        GUI.enabled = true;
+        x += 90;
+
+        if (GUI.Button(new Rect(x, 10, 80, 80), "x")) {
+            webViewObject.ClearCookies();
+        }
+        x += 90;
     }
 }

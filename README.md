@@ -7,6 +7,8 @@ on Unity view. It works on Android, iOS, Unity Web Player, and Mac
 unity-webview is derived from keijiro-san's
 https://github.com/keijiro/unity-webview-integration .
 
+*NOTE: This plugin overlays native WebView/WKWebView views over unity's rendering view and doesn't support those views in 3D. https://github.com/gree/unity-webview/issues/658#issuecomment-793636658 discusses other solutions.*
+
 ## Sample Project
 
 It is placed under `sample/`. You can open it and import the plugin as
@@ -21,7 +23,7 @@ below:
 
 ## Package Manager
 
-If you use Unity 2019.1 or later, the plugin can also be imported with Package Manager, by adding
+If you use Unity 2019.4 or later, the plugin can also be imported with Package Manager, by adding
 the following entry in your `Packages/manifest.json`:
 
 ```json
@@ -34,15 +36,19 @@ the following entry in your `Packages/manifest.json`:
 }
 ```
 
-## Common Notes
+or the following for selecting the variant without Fragment:
 
-### UnityWebViewPostprocessBuild.cs
+```json
+{
+  "dependencies": {
+    ...
+    "net.gree.unity-webview": "https://github.com/gree/unity-webview.git?path=/dist/package-nofragment",
+    ...
+  }
+}
+```
 
-`Assets/Plugins/Editor/UnityWebViewPostprocessBuild.cs` contains code for Android/iOS build, which
-may cause errors if you haven't installed components for these platforms. As discussed in
-https://github.com/gree/unity-webview/pull/397#issuecomment-464631894, I intentionally don't utilize
-`UNITY_IOS` and/or `UNITY_ANDROID`. If you haven't installed Android/iOS components, please comment
-out adequate parts in the script.
+*NOTE: Importing with Package Manager currently doesn't work well for WebGL. Please check the instruction for `dist/unity-webview.unitypackage`.*
 
 ## Platform Specific Notes
 
@@ -140,7 +146,17 @@ which new one (Assets/Plugins/iOS/WebView.mm) utilizes only WKWebView if iOS dep
 
 ### Android
 
-*NOTE: The current implementation for Android utilizes Android Fragment for enabling the file input field after https://github.com/gree/unity-webview/commit/a1a2a89d2d0ced366faed9db308ccf4f689a7278 and may cause new issues that were not found before. If you don't need the file input field, you can install `dist/unity-webview-nofragment.unitypackage` or `dist/unity-webview-nofragment.zip` for selecting the variant without Fragment.*
+#### File Input Field
+
+The current implementation for Android utilizes Android Fragment for enabling the file input field `<input type="file">` since https://github.com/gree/unity-webview/commit/a1a2a89d2d0ced366faed9db308ccf4f689a7278 and may cause new issues that were not found before. If you don't need the file input field, you can install `dist/unity-webview-nofragment.unitypackage` or `dist/unity-webview-nofragment.zip` for selecting the variant without Fragment.
+
+If you utilize the default one and want to enable the file input field, you also have to set one of the following permissions since https://github.com/gree/unity-webview/pull/655 .
+
+* `android.permission.READ_EXTERNAL_STORAGE`
+* `android.permission.WRITE_EXTERNAL_STORAGE`
+* `android.permission.CAMERA`
+
+You can set `android.permission.WRITE_EXTERNAL_STORAGE` by setting `Player Settings/Other Settings/Write Permission` to `External (SDCard)`. You can set `android.permission.CAMERA` by defining `UNITYWEBVIEW_ANDROID_ENABLE_CAMERA` (cf. [Camera/Audio Permission/Feature](#cameraaudio-permissionfeature)).
 
 #### hardwareAccelerated
 
@@ -182,18 +198,32 @@ For allowing http cleartext traffic for Android API level 28 or higher, please d
 
 #### Camera/Audio Permission/Feature
 
-For allowing camera access (`navigator.mediaDevices.getUserMedia({ video:true })`), please define `UNITYWEBVIEW_ANDROID_ENABLE_CAMERA` so that `Assets/Plugins/Editor/UnityWebViewPostprocessBuild.cs` adds the followings to `AndroidManifest.xml`.
+For allowing camera access (`navigator.mediaDevices.getUserMedia({ video:true })`), please define `UNITYWEBVIEW_ANDROID_ENABLE_CAMERA` so that `Assets/Plugins/Editor/UnityWebViewPostprocessBuild.cs` adds the followings to `AndroidManifest.xml`,
 
 ```xml
   <uses-permission android:name="android.permission.CAMERA" />
   <uses-feature android:name="android.hardware.camera" />
 ```
 
-For allowing microphone access (`navigator.mediaDevices.getUserMedia({ audio:true })`), please define `UNITYWEBVIEW_ANDROID_ENABLE_MICROPHONE` so that `Assets/Plugins/Editor/UnityWebViewPostprocessBuild.cs` adds the followings to `AndroidManifest.xml`.
+and call the following on runtime.
+
+```c#
+        webViewObject.SetCameraAccess(true);
+```
+
+For allowing microphone access (`navigator.mediaDevices.getUserMedia({ audio:true })`), please define `UNITYWEBVIEW_ANDROID_ENABLE_MICROPHONE` so that `Assets/Plugins/Editor/UnityWebViewPostprocessBuild.cs` adds the followings to `AndroidManifest.xml`,
 
 ```xml
   <uses-permission android:name="android.permission.MICROPHONE" />
   <uses-feature android:name="android.hardware.microphone" />
+  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+```
+
+and call the following on runtime.
+
+```c#
+        webViewObject.SetMicrophoneAccess(true);
 ```
 
 Details for each Unity version are the same as for hardwareAccelerated. Please also note that it is necessary to request permissions at runtime for Android API 23 or later as below:
@@ -274,7 +304,9 @@ $ ./install.sh
 
 ### WebGL
 
-After importing `dist/unity-webview.unitypackage` or `dist/unity-webview.zip`, please copy `WebGLTemplates/Default/TemplateData` from your Unity installation to `Assets/WebGLTemplates/unity-webivew`. If you utilize Unity 2019.4.13f1 for example,
+*NOTE: for Unity 2020.1.0f1 or newer, please use `unity-webview-2020` instead of `unity-webview` below.*
+
+After importing `dist/unity-webview.unitypackage` or `dist/unity-webview.zip`, please copy `WebGLTemplates/Default/TemplateData` from your Unity installation to `Assets/WebGLTemplates/unity-webivew`. If you utilize Unity 2018.4.13f1 for example,
 
 ```bash
 $ cp -a /Applications/Unity/Hub/Editor/2018.4.13f1/PlaybackEngines/WebGLSupport/BuildTools/WebGLTemplates/Default/TemplateData Assets/WebGLTemplates/unity-webview

@@ -24,8 +24,6 @@
 #import <WebKit/WebKit.h>
 #import <Carbon/Carbon.h>
 #import <CoreGraphics/CGContext.h>
-#import <Metal/Metal.h>
-#import <OpenGL/gl.h>
 #import <unistd.h>
 #include <unordered_map>
 
@@ -39,7 +37,6 @@ static BOOL s_useMetal;
     WKWebView *webView;
     NSString *gameObject;
     NSBitmapImageRep *bitmap;
-    void *textureId;
     BOOL needsDisplay;
     NSMutableDictionary *customRequestHeader;
     NSMutableArray *messages;
@@ -53,6 +50,7 @@ static BOOL s_useMetal;
 @implementation CWebViewPlugin
 
 static WKProcessPool *_sharedProcessPool;
+static NSMutableArray *_instances = [[NSMutableArray alloc] init];
 static std::unordered_map<int, int> _nskey2cgkey{
     { NSUpArrowFunctionKey,          126 },
     { NSDownArrowFunctionKey,        125 },
@@ -128,7 +126,7 @@ static std::unordered_map<int, int> _nskey2cgkey{
     { NSModeSwitchFunctionKey,         0 },
 };
 
-- (id)initWithGameObject:(const char *)gameObject_ transparent:(BOOL)transparent width:(int)width height:(int)height ua:(const char *)ua separated:(BOOL)separated
+- (id)initWithGameObject:(const char *)gameObject_ transparent:(BOOL)transparent zoom:(BOOL)zoom width:(int)width height:(int)height ua:(const char *)ua separated:(BOOL)separated
 {
     self = [super init];
     @synchronized(self) {
@@ -147,6 +145,25 @@ static std::unordered_map<int, int> _nskey2cgkey{
     preferences.javaScriptEnabled = true;
     preferences.plugInsEnabled = true;
     [controller addScriptMessageHandler:self name:@"unityControl"];
+    if (!zoom) {
+        WKUserScript *script
+            = [[WKUserScript alloc]
+                      initWithSource:@"\
+(function() { \
+    var meta = document.querySelector('meta[name=viewport]'); \
+    if (meta == null) { \
+        meta = document.createElement('meta'); \
+        meta.name = 'viewport'; \
+    } \
+    meta.content += ((meta.content.length > 0) ? ',' : '') + 'user-scalable=no'; \
+    var head = document.getElementsByTagName('head')[0]; \
+    head.appendChild(meta); \
+})(); \
+"
+                       injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+                    forMainFrameOnly:YES];
+        [controller addUserScript:script];
+    }
     configuration.userContentController = controller;
     configuration.processPool = _sharedProcessPool;
     // configuration.preferences = preferences;
@@ -166,6 +183,7 @@ static std::unordered_map<int, int> _nskey2cgkey{
     // [webView setPolicyDelegate:(id)self];
     webView.UIDelegate = self;
     webView.navigationDelegate = self;
+    [webView addObserver:self forKeyPath: @"loading" options: NSKeyValueObservingOptionNew context:nil];
     gameObject = [NSString stringWithUTF8String:gameObject_];
     if (ua != NULL && strcmp(ua, "") != 0) {
         [webView setCustomUserAgent:[NSString stringWithUTF8String:ua]];
@@ -186,12 +204,14 @@ static std::unordered_map<int, int> _nskey2cgkey{
 {
     @synchronized(self) {
         if (webView != nil) {
+            WKWebView *webView0 = webView;
+            webView = nil;
             // [webView setFrameLoadDelegate:nil];
             // [webView setPolicyDelegate:nil];
-            webView.UIDelegate = nil;
-            webView.navigationDelegate = nil;
-            [webView stopLoading:nil];
-            webView = nil;
+            webView0.UIDelegate = nil;
+            webView0.navigationDelegate = nil;
+            [webView0 stopLoading];
+            [webView0 removeObserver:self forKeyPath:@"loading"];
         }
         if (window != nil) {
             [window close];
@@ -208,6 +228,96 @@ static std::unordered_map<int, int> _nskey2cgkey{
     }
 }
 
++ (void)resetSharedProcessPool
+{
+    // cf. https://stackoverflow.com/questions/33156567/getting-all-cookies-from-wkwebview/49744695#49744695
+    _sharedProcessPool = [[WKProcessPool alloc] init];
+    [_instances enumerateObjectsUsingBlock:^(CWebViewPlugin *obj, NSUInteger idx, BOOL *stop) {
+        if ([obj->webView isKindOfClass:[WKWebView class]]) {
+            WKWebView *webView = (WKWebView *)obj->webView;
+            webView.configuration.processPool = _sharedProcessPool;
+        }
+    }];
+}
+
++ (void)clearCookies
+{
+    [CWebViewPlugin resetSharedProcessPool];
+
+    // cf. https://dev.classmethod.jp/smartphone/remove-webview-cookies/
+    NSString *libraryPath = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *cookiesPath = [libraryPath stringByAppendingPathComponent:@"Cookies"];
+    NSString *webKitPath = [libraryPath stringByAppendingPathComponent:@"WebKit"];
+    [[NSFileManager defaultManager] removeItemAtPath:cookiesPath error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:webKitPath error:nil];
+
+    NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    if (cookieStorage == nil) {
+        // cf. https://stackoverflow.com/questions/33876295/nshttpcookiestorage-sharedhttpcookiestorage-comes-up-empty-in-10-11
+        cookieStorage = [NSHTTPCookieStorage sharedCookieStorageForGroupContainerIdentifier:@"Cookies"];
+    }
+    [[cookieStorage cookies] enumerateObjectsUsingBlock:^(NSHTTPCookie *cookie, NSUInteger idx, BOOL *stop) {
+        [cookieStorage deleteCookie:cookie];
+    }];
+
+    NSOperatingSystemVersion version = { 10, 11, 0 };
+    if ([[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:version]) {
+        NSSet *websiteDataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
+        NSDate *date = [NSDate dateWithTimeIntervalSince1970:0];
+        [[WKWebsiteDataStore defaultDataStore] removeDataOfTypes:websiteDataTypes
+                                                   modifiedSince:date
+                                               completionHandler:^{}];
+    }
+}
+
++ (void)saveCookies
+{
+    [CWebViewPlugin resetSharedProcessPool];
+}
+
++ (const char *)getCookies:(const char *)url
+{
+    [CWebViewPlugin resetSharedProcessPool];
+
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    [formatter setDateFormat:@"EEE, dd MMM yyyy HH:mm:ss zzz"];
+    NSMutableString *result = [NSMutableString string];
+    NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    if (cookieStorage == nil) {
+        // cf. https://stackoverflow.com/questions/33876295/nshttpcookiestorage-sharedhttpcookiestorage-comes-up-empty-in-10-11
+        cookieStorage = [NSHTTPCookieStorage sharedCookieStorageForGroupContainerIdentifier:@"Cookies"];
+    }
+    [[cookieStorage cookiesForURL:[NSURL URLWithString:[[NSString alloc] initWithUTF8String:url]]]
+        enumerateObjectsUsingBlock:^(NSHTTPCookie *cookie, NSUInteger idx, BOOL *stop) {
+            [result appendString:[NSString stringWithFormat:@"%@=%@", cookie.name, cookie.value]];
+            if ([cookie.domain length] > 0) {
+                [result appendString:[NSString stringWithFormat:@"; "]];
+                [result appendString:[NSString stringWithFormat:@"Domain=%@", cookie.domain]];
+            }
+            if ([cookie.path length] > 0) {
+                [result appendString:[NSString stringWithFormat:@"; "]];
+                [result appendString:[NSString stringWithFormat:@"Path=%@", cookie.path]];
+            }
+            if (cookie.expiresDate != nil) {
+                [result appendString:[NSString stringWithFormat:@"; "]];
+                [result appendString:[NSString stringWithFormat:@"Expires=%@", [formatter stringFromDate:cookie.expiresDate]]];
+            }
+            [result appendString:[NSString stringWithFormat:@"; "]];
+            [result appendString:[NSString stringWithFormat:@"Version=%zd", cookie.version]];
+            [result appendString:[NSString stringWithFormat:@"\n"]];
+        }];
+    const char *s = [result UTF8String];
+    char *r = (char *)malloc(strlen(s) + 1);
+    strcpy(r, s);
+    return r;
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView
+{
+    [self addMessage:[NSString stringWithFormat:@"E%@",@"webViewWebContentProcessDidTerminate"]];
+}
+
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error
 {
     [self addMessage:[NSString stringWithFormat:@"E%@",[error description]]];
@@ -216,11 +326,6 @@ static std::unordered_map<int, int> _nskey2cgkey{
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error
 {
     [self addMessage:[NSString stringWithFormat:@"E%@",[error description]]];
-}
-
-- (void)webView:(WKWebView*)wkWebView didCommitNavigation:(null_unspecified WKNavigation *)navigation
-{
-    [self addMessage:[NSString stringWithFormat:@"L%s","Unknown URL"]];
 }
 
 - (void)webView:(WKWebView *)wkWebView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler
@@ -295,6 +400,19 @@ static std::unordered_map<int, int> _nskey2cgkey{
     NSString *exec = [NSString stringWithFormat:exec_template, version];
     [webView evaluateJavaScript:exec completionHandler:nil];
     */
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary *)change
+                       context:(void *)context {
+    if (webView == nil)
+        return;
+
+    if ([keyPath isEqualToString:@"loading"] && [[change objectForKey:NSKeyValueChangeNewKey] intValue] == 0
+        && [webView URL] != nil) {
+        [self addMessage:[NSString stringWithFormat:@"L%s",[[[webView URL] absoluteString] UTF8String]]];
+    }
 }
 
 - (void)addMessage:(NSString*)msg
@@ -470,6 +588,13 @@ static std::unordered_map<int, int> _nskey2cgkey{
     [webView goForward];
 }
 
+- (void)reload
+{
+    if (webView == nil)
+        return;
+    [webView reload];
+}
+
 - (void)sendMouseEvent:(int)x y:(int)y deltaY:(float)deltaY mouseState:(int)mouseState
 {
     if (webView == nil)
@@ -596,37 +721,38 @@ static std::unordered_map<int, int> _nskey2cgkey{
                                                              bytesPerRow:(4 * rect.size.width)
                                                             bitsPerPixel:32];
                 // bitmap = [webView bitmapImageRepForCachingDisplayInRect:webView.frame];
+                needsDisplay = true;
             }
             inRendering = YES;
             if (window != nil) {
                 memset([bitmap bitmapData], 128, [bitmap bytesPerRow] * [bitmap pixelsHigh]);
+                needsDisplay = true;
                 inRendering = NO;
             } else {
-                NSBitmapImageRep *bmpRep = bitmap;
-                // memset([bitmap bitmapData], 0, [bitmap bytesPerRow] * [bitmap pixelsHigh]);
-                // [webView cacheDisplayInRect:webView.frame toBitmapImageRep:bitmap];
-                WKWebView *wkv = webView;
-                WKSnapshotConfiguration *cfg = [WKSnapshotConfiguration new];
-                //cfg.snapshotWidth = [NSNumber numberWithLong:[bitmap pixelsWide]];
-                //cfg.rect = webView.frame;
-                [wkv takeSnapshotWithConfiguration:cfg
+                [webView takeSnapshotWithConfiguration:[WKSnapshotConfiguration new]
                                  completionHandler:^(NSImage *nsImg, NSError *err) {
-                    if (err == nil) {
-                        NSGraphicsContext *ctx = [NSGraphicsContext graphicsContextWithBitmapImageRep:bmpRep];
-                        [NSGraphicsContext saveGraphicsState];
-                        [NSGraphicsContext setCurrentContext:ctx];
-                        [nsImg drawAtPoint:CGPointZero
-                                  fromRect:CGRectMake(0, 0, [bmpRep pixelsWide], [bmpRep pixelsHigh])
-                                 operation:NSCompositingOperationCopy
-                                  fraction:1.0];
-                        [[NSGraphicsContext currentContext] flushGraphics];
-                        [NSGraphicsContext restoreGraphicsState];
-                    }
-                    self->inRendering = NO;
+                    dispatch_async(
+                        dispatch_get_main_queue(),
+                        ^{
+                            @synchronized(self) {
+                                if (err == nil && self->bitmap != nil) {
+                                    NSGraphicsContext *ctx = [NSGraphicsContext graphicsContextWithBitmapImageRep:self->bitmap];
+                                    [NSGraphicsContext saveGraphicsState];
+                                    [NSGraphicsContext setCurrentContext:ctx];
+                                    [nsImg drawAtPoint:CGPointZero
+                                              fromRect:CGRectMake(0, 0, [self->bitmap pixelsWide], [self->bitmap pixelsHigh])
+                                             operation:NSCompositingOperationCopy
+                                              fraction:1.0];
+                                    [[NSGraphicsContext currentContext] flushGraphics];
+                                    [NSGraphicsContext restoreGraphicsState];
+                                }
+                                self->needsDisplay = true;
+                                self->inRendering = NO;
+                            }
+                        });
                 }];
             }
         }
-        needsDisplay = refreshBitmap;
     }
 }
 
@@ -644,14 +770,7 @@ static std::unordered_map<int, int> _nskey2cgkey{
     }
 }
 
-- (void)setTextureId:(void *)tId
-{
-    @synchronized(self) {
-        textureId = tId;
-    }
-}
-
-- (void)render
+- (void)render:(void *)textureBuffer
 {
     @synchronized(self) {
         if (webView == nil)
@@ -660,26 +779,37 @@ static std::unordered_map<int, int> _nskey2cgkey{
             return;
         if (bitmap == nil)
             return;
-
-        NSInteger w = [bitmap pixelsWide];
-        NSInteger h = [bitmap pixelsHigh];
-        NSInteger r = w * [bitmap samplesPerPixel];
-        void *d = [bitmap bitmapData];
-        if (s_useMetal) {
-            id<MTLTexture> tex = (__bridge id<MTLTexture>)textureId;
-            [tex replaceRegion:MTLRegionMake3D(0, 0, 0, w, h, 1) mipmapLevel:0 withBytes:d bytesPerRow:r];
-        } else {
-            int rowLength = 0;
-            int unpackAlign = 0;
-            glGetIntegerv(GL_UNPACK_ROW_LENGTH, &rowLength);
-            glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlign);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)w);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glBindTexture(GL_TEXTURE_2D, (GLuint)(long)textureId);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h, GL_RGBA, GL_UNSIGNED_BYTE, d);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, rowLength);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, unpackAlign);
+        int w = (int)[bitmap pixelsWide];
+        int h = (int)[bitmap pixelsHigh];
+        int p = (int)[bitmap samplesPerPixel];
+        int r = (int)[bitmap bytesPerRow];
+        uint8_t *s0 = (uint8_t *)[bitmap bitmapData];
+        uint32_t *d0 = (uint32_t *)textureBuffer;
+        if (p == 3) {
+            for (int y = 0; y < h; y++) {
+                uint8_t *s = s0 + y * r;
+                uint32_t *d = d0 + y * w;
+                for (int x = 0; x < w; x++) {
+                    uint32_t r = *s++;
+                    uint32_t g = *s++;
+                    uint32_t b = *s++;
+                    *d++ = (0xff << 24) | (b << 16) | (g << 8) | r;
+                }
+            }
+        } else if (p == 4) {
+            for (int y = 0; y < h; y++) {
+                uint8_t *s = s0 + y * r;
+                uint32_t *d = d0 + y * w;
+                for (int x = 0; x < w; x++) {
+                    uint32_t r = *s++;
+                    uint32_t g = *s++;
+                    uint32_t b = *s++;
+                    uint32_t a = *s++;
+                    *d++ = (a << 24) | (b << 16) | (g << 8) | r;
+                }
+            }
         }
+        needsDisplay = false;
     }
 }
 
@@ -728,7 +858,7 @@ extern "C" {
     const char *_CWebViewPlugin_GetAppPath(void);
     void _CWebViewPlugin_InitStatic(BOOL inEditor, BOOL useMetal);
     void *_CWebViewPlugin_Init(
-        const char *gameObject, BOOL transparent, int width, int height, const char *ua, BOOL separated);
+        const char *gameObject, BOOL transparent, BOOL zoom, int width, int height, const char *ua, BOOL separated);
     void _CWebViewPlugin_Destroy(void *instance);
     void _CWebViewPlugin_SetRect(void *instance, int width, int height);
     void _CWebViewPlugin_SetVisibility(void *instance, BOOL visibility);
@@ -741,19 +871,20 @@ extern "C" {
     BOOL _CWebViewPlugin_CanGoForward(void *instance);
     void _CWebViewPlugin_GoBack(void *instance);
     void _CWebViewPlugin_GoForward(void *instance);
+    void _CWebViewPlugin_Reload(void *instance);
     void _CWebViewPlugin_SendMouseEvent(void *instance, int x, int y, float deltaY, int mouseState);
     void _CWebViewPlugin_SendKeyEvent(void *instance, int x, int y, char *keyChars, unsigned short keyCode, int keyState);
     void _CWebViewPlugin_Update(void *instance, BOOL refreshBitmap);
     int _CWebViewPlugin_BitmapWidth(void *instance);
     int _CWebViewPlugin_BitmapHeight(void *instance);
-    void _CWebViewPlugin_SetTextureId(void *instance, void *textureId);
-    void _CWebViewPlugin_SetCurrentInstance(void *instance);
-    void UnityRenderEvent(int eventId);
-    UnityRenderEventFunc GetRenderEventFunc(void);
+    void _CWebViewPlugin_Render(void *instance, void *textureBuffer);
     void _CWebViewPlugin_AddCustomHeader(void *instance, const char *headerKey, const char *headerValue);
     void _CWebViewPlugin_RemoveCustomHeader(void *instance, const char *headerKey);
     void _CWebViewPlugin_ClearCustomHeader(void *instance);
     const char *_CWebViewPlugin_GetCustomHeaderValue(void *instance, const char *headerKey);
+    void _CWebViewPlugin_ClearCookies();
+    void _CWebViewPlugin_SaveCookies();
+    const char *_CWebViewPlugin_GetCookies(const char *url);
     const char *_CWebViewPlugin_GetMessage(void *instance);
 #ifdef __cplusplus
 }
@@ -767,8 +898,6 @@ const char *_CWebViewPlugin_GetAppPath(void)
     return r;
 }
 
-static NSMutableSet *pool;
-
 void _CWebViewPlugin_InitStatic(BOOL inEditor, BOOL useMetal)
 {
     s_inEditor = inEditor;
@@ -776,21 +905,17 @@ void _CWebViewPlugin_InitStatic(BOOL inEditor, BOOL useMetal)
 }
 
 void *_CWebViewPlugin_Init(
-    const char *gameObject, BOOL transparent, int width, int height, const char *ua, BOOL separated)
+    const char *gameObject, BOOL transparent, BOOL zoom, int width, int height, const char *ua, BOOL separated)
 {
-    if (pool == 0)
-        pool = [[NSMutableSet alloc] init];
-
-    CWebViewPlugin *webViewPlugin = [[CWebViewPlugin alloc] initWithGameObject:gameObject transparent:transparent width:width height:height ua:ua separated:separated];
-    [pool addObject:webViewPlugin];
+    CWebViewPlugin *webViewPlugin = [[CWebViewPlugin alloc] initWithGameObject:gameObject transparent:transparent zoom:zoom width:width height:height ua:ua separated:separated];
+    [_instances addObject:webViewPlugin];
     return (__bridge_retained void *)webViewPlugin;
 }
 
 void _CWebViewPlugin_Destroy(void *instance)
 {
-    _CWebViewPlugin_SetCurrentInstance(NULL);
     CWebViewPlugin *webViewPlugin = (__bridge_transfer CWebViewPlugin *)instance;
-    [pool removeObject:webViewPlugin];
+    [_instances removeObject:webViewPlugin];
     [webViewPlugin dispose];
     webViewPlugin = nil;
 }
@@ -861,6 +986,12 @@ void _CWebViewPlugin_GoForward(void *instance)
     [webViewPlugin goForward];
 }
 
+void _CWebViewPlugin_Reload(void *instance)
+{
+    CWebViewPlugin *webViewPlugin = (__bridge CWebViewPlugin *)instance;
+    [webViewPlugin reload];
+}
+
 void _CWebViewPlugin_SendMouseEvent(void *instance, int x, int y, float deltaY, int mouseState)
 {
     CWebViewPlugin *webViewPlugin = (__bridge CWebViewPlugin *)instance;
@@ -891,34 +1022,10 @@ int _CWebViewPlugin_BitmapHeight(void *instance)
     return [webViewPlugin bitmapHigh];
 }
 
-void _CWebViewPlugin_SetTextureId(void *instance, void *textureId)
+void _CWebViewPlugin_Render(void *instance, void *textureBuffer)
 {
     CWebViewPlugin *webViewPlugin = (__bridge CWebViewPlugin *)instance;
-    [webViewPlugin setTextureId:textureId];
-}
-
-static void *_instance;
-
-void _CWebViewPlugin_SetCurrentInstance(void *instance)
-{
-    _instance = instance;
-}
-
-void UnityRenderEvent(int eventId)
-{
-    if (_instance == nil) {
-        return;
-    }
-    CWebViewPlugin *webViewPlugin = (__bridge CWebViewPlugin *)_instance;
-    _instance = nil;
-    if ([pool containsObject:webViewPlugin]) {
-        [webViewPlugin render];
-    }
-}
-
-UnityRenderEventFunc GetRenderEventFunc(void)
-{
-    return UnityRenderEvent;
+    [webViewPlugin render:textureBuffer];
 }
 
 void _CWebViewPlugin_AddCustomHeader(void *instance, const char *headerKey, const char *headerValue)
@@ -943,6 +1050,21 @@ void _CWebViewPlugin_ClearCustomHeader(void *instance)
 {
     CWebViewPlugin *webViewPlugin = (__bridge CWebViewPlugin *)instance;
     [webViewPlugin clearCustomRequestHeader];
+}
+
+void _CWebViewPlugin_ClearCookies()
+{
+    [CWebViewPlugin clearCookies];
+}
+
+void _CWebViewPlugin_SaveCookies()
+{
+    [CWebViewPlugin saveCookies];
+}
+
+const char *_CWebViewPlugin_GetCookies(const char *url)
+{
+    return [CWebViewPlugin getCookies:url];
 }
 
 const char *_CWebViewPlugin_GetMessage(void *instance)
