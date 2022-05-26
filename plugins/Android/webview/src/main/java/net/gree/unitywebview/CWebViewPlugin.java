@@ -40,6 +40,7 @@ import android.util.Base64;
 import android.util.Log;
 import android.util.Pair;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup.LayoutParams;
 import android.view.ViewTreeObserver.OnGlobalLayoutListener;
@@ -68,11 +69,13 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
+import java.util.Queue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.regex.Matcher;
@@ -101,7 +104,7 @@ class CWebViewPluginInterface {
         }
         a.runOnUiThread(new Runnable() {public void run() {
             if (mPlugin.IsInitialized()) {
-                UnityPlayer.UnitySendMessage(mGameObject, method, message);
+                mPlugin.MyUnitySendMessage(mGameObject, method, message);
             }
         }});
     }
@@ -112,6 +115,7 @@ public class CWebViewPlugin extends Fragment {
     private static final int REQUEST_CODE = 100001;
 
     private static FrameLayout layout = null;
+    private Queue<String> mMessages = new ArrayDeque<String>();
     private WebView mWebView;
     private View mVideoView;
     private OnGlobalLayoutListener mGlobalLayoutListener;
@@ -119,6 +123,7 @@ public class CWebViewPlugin extends Fragment {
     private int progress;
     private boolean canGoBack;
     private boolean canGoForward;
+    private boolean mInteractionEnabled = true;
     private boolean mAlertDialogEnabled;
     private boolean mAllowVideoCapture;
     private boolean mAllowAudioCapture;
@@ -270,6 +275,18 @@ public class CWebViewPlugin extends Fragment {
             return true;
         } else {
             return true;
+        }
+    }
+
+    public String GetMessage() {
+        synchronized(mMessages) {
+            return (mMessages.size() > 0) ? mMessages.poll() : null;
+        }
+    }
+
+    public void MyUnitySendMessage(String gameObject, String method, String message) {
+        synchronized(mMessages) {
+            mMessages.add(method + ":" + message);
         }
     }
 
@@ -662,6 +679,15 @@ public class CWebViewPlugin extends Fragment {
                 webView.setBackgroundColor(0x00000000);
             }
 
+            // cf. https://stackoverflow.com/questions/3853794/disable-webview-touch-events-in-android/3856199#3856199
+            webView.setOnTouchListener(
+                new View.OnTouchListener() {
+                    @Override
+                    public boolean onTouch(View view, MotionEvent event) {
+                        return !mInteractionEnabled;
+                    }
+                });
+
             if (layout == null || layout.getParent() != a.findViewById(android.R.id.content)) {
                 layout = new FrameLayout(a);
                 a.addContentView(
@@ -709,10 +735,14 @@ public class CWebViewPlugin extends Fragment {
                     bottomPadding = realSize.y - (location[1] + rootView.getHeight());
                 }
                 int heightDiff = rootView.getHeight() - (r.bottom - r.top);
+                String param = "" ;
                 if (heightDiff > 0 && (heightDiff + bottomPadding) > (h + bottomPadding) / 3) { // assume that this means that the keyboard is on
-                    UnityPlayer.UnitySendMessage(gameObject, "SetKeyboardVisible", "true");
+                    param = "true";
                 } else {
-                    UnityPlayer.UnitySendMessage(gameObject, "SetKeyboardVisible", "false");
+                    param = "false";
+                }
+                if (IsInitialized()) {
+                    MyUnitySendMessage(gameObject, "SetKeyboardVisible", param);
                 }
             }
         };
@@ -749,7 +779,7 @@ public class CWebViewPlugin extends Fragment {
         Intent contentSelectionIntent = new Intent(Intent.ACTION_GET_CONTENT);
         contentSelectionIntent.addCategory(Intent.CATEGORY_OPENABLE);
         contentSelectionIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        contentSelectionIntent.setType("image/*");
+        contentSelectionIntent.setType("*/*");
 
         Intent[] intentArray;
         if(takePictureIntent != null) {
@@ -784,11 +814,14 @@ public class CWebViewPlugin extends Fragment {
     public void Destroy() {
         final Activity a = UnityPlayer.currentActivity;
         final CWebViewPlugin self = this;
+        final WebView webView = mWebView;
+        mWebView = null;
+        mMessages.clear();
         if (CWebViewPlugin.isDestroyed(a)) {
             return;
         }
         a.runOnUiThread(new Runnable() {public void run() {
-            if (mWebView == null) {
+            if (webView == null) {
                 return;
             }
             if (mGlobalLayoutListener != null) {
@@ -796,15 +829,14 @@ public class CWebViewPlugin extends Fragment {
                 activityRootView.getViewTreeObserver().removeOnGlobalLayoutListener(mGlobalLayoutListener);
                 mGlobalLayoutListener = null;
             }
-            mWebView.stopLoading();
+            webView.stopLoading();
             if (mVideoView != null) {
                 layout.removeView(mVideoView);
                 layout.setBackgroundColor(0x00000000);
                 mVideoView = null;
             }
-            layout.removeView(mWebView);
-            mWebView.destroy();
-            mWebView = null;
+            layout.removeView(webView);
+            webView.destroy();
 
             if (mPaused) {
                 if (mTransactions == null) {
@@ -965,6 +997,16 @@ public class CWebViewPlugin extends Fragment {
             } else {
                 mWebView.setVisibility(View.GONE);
             }
+        }});
+    }
+
+    public void SetInteractionEnabled(final boolean enabled) {
+        final Activity a = UnityPlayer.currentActivity;
+        if (CWebViewPlugin.isDestroyed(a)) {
+            return;
+        }
+        a.runOnUiThread(new Runnable() {public void run() {
+            mInteractionEnabled = enabled;
         }});
     }
 

@@ -74,8 +74,6 @@ public class WebViewObject : MonoBehaviour
     Texture2D texture;
     byte[] textureDataBuffer;
     string inputString = "";
-    // string keyChars0 = "";
-    // ushort keyCode0 = 0;
     bool hasFocus;
 #elif UNITY_IPHONE
     IntPtr webView;
@@ -107,6 +105,39 @@ public class WebViewObject : MonoBehaviour
         {
             mResumedTimestamp = 0.0f;
             webView.Call("SetVisibility", mVisibility);
+        }
+        for (;;) {
+            if (webView == null)
+                break;
+            var s = webView.Call<String>("GetMessage");
+            if (s == null)
+                break;
+            var i = s.IndexOf(':', 0);
+            if (i == -1)
+                continue;
+            switch (s.Substring(0, i)) {
+            case "CallFromJS":
+                CallFromJS(s.Substring(i + 1));
+                break;
+            case "CallOnError":
+                CallOnError(s.Substring(i + 1));
+                break;
+            case "CallOnHttpError":
+                CallOnHttpError(s.Substring(i + 1));
+                break;
+            case "CallOnLoaded":
+                CallOnLoaded(s.Substring(i + 1));
+                break;
+            case "CallOnStarted":
+                CallOnStarted(s.Substring(i + 1));
+                break;
+            case "CallOnHooked":
+                CallOnHooked(s.Substring(i + 1));
+                break;
+            case "SetKeyboardVisible":
+                SetKeyboardVisible(s.Substring(i + 1));
+                break;
+            }
         }
     }
 
@@ -268,6 +299,9 @@ public class WebViewObject : MonoBehaviour
         IntPtr instance, bool enabled);
     [DllImport("__Internal")]
     private static extern void _CWebViewPlugin_SetScrollBounceEnabled(
+        IntPtr instance, bool enabled);
+    [DllImport("__Internal")]
+    private static extern void _CWebViewPlugin_SetInteractionEnabled(
         IntPtr instance, bool enabled);
     [DllImport("__Internal")]
     private static extern bool _CWebViewPlugin_SetURLPattern(
@@ -676,6 +710,23 @@ public class WebViewObject : MonoBehaviour
 #endif
     }
 
+    public void SetInteractionEnabled(bool enabled)
+    {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+        // TODO: UNSUPPORTED
+#elif UNITY_IPHONE
+        if (webView == IntPtr.Zero)
+            return;
+        _CWebViewPlugin_SetInteractionEnabled(webView, enabled);
+#elif UNITY_ANDROID
+        if (webView == null)
+            return;
+        webView.Call("SetInteractionEnabled", enabled);
+#else
+        // TODO: UNSUPPORTED
+#endif
+    }
+
     public void SetAlertDialogEnabled(bool e)
     {
 #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
@@ -727,7 +778,8 @@ public class WebViewObject : MonoBehaviour
 #elif UNITY_IPHONE
         // TODO: UNSUPPORTED
 #elif UNITY_ANDROID
-        // TODO: UNSUPPORTED
+        if (webView == null)
+            return;
         webView.Call("SetCameraAccess", allowed);
 #else
         // TODO: UNSUPPORTED
@@ -741,7 +793,8 @@ public class WebViewObject : MonoBehaviour
 #elif UNITY_IPHONE
         // TODO: UNSUPPORTED
 #elif UNITY_ANDROID
-        // TODO: UNSUPPORTED
+        if (webView == null)
+            return;
         webView.Call("SetMicrophoneAccess", allowed);
 #else
         // TODO: UNSUPPORTED
@@ -1250,76 +1303,48 @@ public class WebViewObject : MonoBehaviour
     {
         if (webView == IntPtr.Zero || !visibility)
             return;
-
-        if (Input.GetMouseButtonDown(0) || Input.GetMouseButtonDown(1) || Input.GetMouseButtonDown(2))
-        {
-            hasFocus = rect.Contains(Input.mousePosition);
-        }
         switch (Event.current.type) {
         case EventType.MouseDown:
         case EventType.MouseUp:
-        case EventType.MouseMove:
-        case EventType.MouseDrag:
-        case EventType.ScrollWheel:
-            {
-                if (hasFocus)
-                {
-                    Vector3 p;
-                    p.x = Input.mousePosition.x - rect.x;
-                    p.y = Input.mousePosition.y - rect.y;
-                    {
-                        int mouseState = 0;
-                        if (Input.GetButtonDown("Fire1")) {
-                            mouseState = 1;
-                        } else if (Input.GetButtonUp("Fire1")) {
-                            mouseState = 3;
-                        } else if (Input.GetButton("Fire1")) {
-                            mouseState = 2;
-                        }
-                        _CWebViewPlugin_SendMouseEvent(webView, (int)p.x, (int)p.y, Input.GetAxis("Mouse ScrollWheel"), mouseState);
-                    }
-                }
-            }
+            hasFocus = rect.Contains(Input.mousePosition);
             break;
-        case EventType.KeyDown:
-        case EventType.KeyUp:
-            {
-                string keyChars = "";
-                ushort keyCode = 0;
-                if (!string.IsNullOrEmpty(inputString)) {
-                    keyChars = inputString.Substring(0, 1);
-                    keyCode = (ushort)inputString[0];
-                        inputString = inputString.Substring(1);
-                }
-                if (!string.IsNullOrEmpty(keyChars) || keyCode != 0) {
-                    if (hasFocus)
-                    {
-                        Vector3 p;
-                        p.x = Input.mousePosition.x - rect.x;
-                        p.y = Input.mousePosition.y - rect.y;
-                        _CWebViewPlugin_SendKeyEvent(webView, (int)p.x, (int)p.y, keyChars, keyCode, 1);
+        }
+        switch (Event.current.type) {
+        case EventType.MouseMove:
+        case EventType.MouseDown:
+        case EventType.MouseDrag:
+        case EventType.MouseUp:
+        case EventType.ScrollWheel:
+            if (hasFocus) {
+                Vector3 p;
+                p.x = Input.mousePosition.x - rect.x;
+                p.y = Input.mousePosition.y - rect.y;
+                {
+                    int mouseState = 0;
+                    if (Input.GetButtonDown("Fire1")) {
+                        mouseState = 1;
+                    } else if (Input.GetButton("Fire1")) {
+                        mouseState = 2;
+                    } else if (Input.GetButtonUp("Fire1")) {
+                        mouseState = 3;
                     }
+                    //_CWebViewPlugin_SendMouseEvent(webView, (int)p.x, (int)p.y, Input.GetAxis("Mouse ScrollWheel"), mouseState);
+                    _CWebViewPlugin_SendMouseEvent(webView, (int)p.x, (int)p.y, Input.mouseScrollDelta.y, mouseState);
                 }
-                // if (keyChars != keyChars0) {
-                //     if (!string.IsNullOrEmpty(keyChars0)) {
-                //         Debug.Log("XX1 " + (short)keyChars0[0]);
-                //         _CWebViewPlugin_SendKeyEvent(webView, (int)p.x, (int)p.y, keyChars0, keyCode0, 3);
-                //     }
-                //     if (!string.IsNullOrEmpty(keyChars)) {
-                //         Debug.Log("XX2 " + (short)keyChars[0]);
-                //         _CWebViewPlugin_SendKeyEvent(webView, (int)p.x, (int)p.y, keyChars, keyCode, 1);
-                //     }
-                // } else {
-                //     if (!string.IsNullOrEmpty(keyChars)) {
-                //         Debug.Log("XX3");
-                //         _CWebViewPlugin_SendKeyEvent(webView, (int)p.x, (int)p.y, keyChars, keyCode, 2);
-                //     }
-                // }
-                // keyChars0 = keyChars;
-                // keyCode0 = keyCode;
             }
             break;
         case EventType.Repaint:
+            while (!string.IsNullOrEmpty(inputString)) {
+                var keyChars = inputString.Substring(0, 1);
+                var keyCode = (ushort)inputString[0];
+                inputString = inputString.Substring(1);
+                if (!string.IsNullOrEmpty(keyChars) || keyCode != 0) {
+                    Vector3 p;
+                    p.x = Input.mousePosition.x - rect.x;
+                    p.y = Input.mousePosition.y - rect.y;
+                    _CWebViewPlugin_SendKeyEvent(webView, (int)p.x, (int)p.y, keyChars, keyCode, 1);
+                }
+            }
             if (texture != null) {
                 Matrix4x4 m = GUI.matrix;
                 GUI.matrix
